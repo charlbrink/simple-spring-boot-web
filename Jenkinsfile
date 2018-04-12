@@ -8,13 +8,13 @@
 String ocpApiServer = env.OCP_API_SERVER ? "${env.OCP_API_SERVER}" : "https://openshift.default.svc.cluster.local"
 
 node('master') {
-  
+
   env.NAMESPACE = readFile('/var/run/secrets/kubernetes.io/serviceaccount/namespace').trim()
   env.TOKEN = readFile('/var/run/secrets/kubernetes.io/serviceaccount/token').trim()
   env.OC_CMD = "oc --request-timeout='0' --token=${env.TOKEN} --server=${ocpApiServer} --certificate-authority=/run/secrets/kubernetes.io/serviceaccount/ca.crt --namespace=${env.NAMESPACE}"
 
   env.APP_NAME = "${env.JOB_NAME}".replaceAll(/-?pipeline-?/, '').replaceAll(/-?${env.NAMESPACE}-?/, '')
-  def projectBase = "${env.NAMESPACE}".replaceAll(/-dev/, '')
+  def projectBase = "${env.NAMESPACE}".replaceAll(/-build/, '')
   env.STAGE1 = "${projectBase}-dev"
   env.STAGE2 = "${projectBase}-stage"
   env.STAGE3 = "${projectBase}-prod"
@@ -22,7 +22,6 @@ node('master') {
 }
 
 node('maven') {
-  def mvnHome = env.MAVEN_HOME ? "${env.MAVEN_HOME}" : "/usr/share/maven/"
   def mvnCmd = "mvn"
   String pomFileLocation = env.BUILD_CONTEXT_DIR ? "${env.BUILD_CONTEXT_DIR}/pom.xml" : "pom.xml"
 
@@ -52,7 +51,7 @@ node('maven') {
   def version    = getVersionFromPom("./pom.xml")
   println("Artifact ID:" + artifactId + ", Group ID:" + groupId)
   println("New version tag:" + version)
-  
+
   stage('Build Image') {
 
     sh """
@@ -66,11 +65,17 @@ node('maven') {
      """
   }
 
+  stage("Promote To ${env.STAGE1}") {
+    sh """
+    ${env.OC_CMD} tag ${env.NAMESPACE}/${env.APP_NAME}:latest ${env.STAGE1}/${env.APP_NAME}:latest
+    """
+  }
+
   stage("Verify Deployment to ${env.STAGE1}") {
 
     openshiftVerifyDeployment(deploymentConfig: "${env.APP_NAME}", namespace: "${STAGE1}", verifyReplicaCount: true)
 
-    //input "Promote Application to Stage?"
+    input "Promote Application to Stage?"
   }
 
   stage('Integration Test') {
@@ -94,9 +99,9 @@ node('maven') {
 
   def newState = "blue"
   def currentState = "green"
-  
+
   stage("Promote To ${env.STAGE3}") {
-  
+
     sh "oc get route ${env.APP_NAME} -n ${env.STAGE3} -o jsonpath='{ .spec.to.name }' --loglevel=4 > activeservice"
     activeService = readFile('activeservice').trim()
     println("Current active service:" + activeService)
@@ -109,7 +114,7 @@ node('maven') {
       ${env.OC_CMD} tag ${env.STAGE1}/${env.APP_NAME}:'latest' ${env.STAGE3}/${env.APP_NAME}-${newState}:${version}
       """
     sh "${env.OC_CMD} patch dc ${env.APP_NAME}-${newState} --patch '{\"spec\": { \"triggers\": [ { \"type\": \"ImageChange\", \"imageChangeParams\": { \"containerNames\": [ \"${env.APP_NAME}-${newState}\" ], \"from\": { \"kind\": \"ImageStreamTag\", \"namespace\": \"${env.STAGE3}\", \"name\": \"${env.APP_NAME}-${newState}:${version}\"}}}]}}' -n ${env.STAGE3}"
-    
+
     openshiftDeploy (apiURL: "${ocpApiServer}", authToken: "${env.TOKEN}", depCfg: "${env.APP_NAME}-${newState}", namespace: "${env.STAGE3}",  waitTime: '300', waitUnit: 'sec')
 
   }
@@ -119,12 +124,12 @@ node('maven') {
     openshiftVerifyDeployment(deploymentConfig: "${env.APP_NAME}-${newState}", namespace: "${STAGE3}", verifyReplicaCount: true)
     println "Application ${env.APP_NAME}-${newState} is now in Production!"
 
-    input "Switch ${env.STAGE3} form ${currentState} to ${newState} deployment?"
-    
+    input "Switch ${env.STAGE3} from ${currentState} to ${newState} deployment?"
+
     // Switch Route to new active c
     sh "oc patch route ${env.APP_NAME} --patch '{\"spec\": { \"to\": { \"name\": \"${env.APP_NAME}-${newState}\"}}}' -n ${env.STAGE3}"
     println("Route switched to: " + newState)
-    
+
   }
 }
 
