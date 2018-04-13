@@ -71,7 +71,7 @@ node('maven') {
                 done
 
                 ${env.OC_CMD} start-build ${env.APP_NAME} --from-dir=oc-build --wait=true --follow=true || exit 1
-            """
+      """
     }
 
     stage("Deploy to ${env.STAGE1}") {
@@ -79,7 +79,7 @@ node('maven') {
 
       sh """
                 ${env.OC_CMD} tag ${env.NAMESPACE}/${env.APP_NAME}:${tag} ${env.STAGE1}/${env.APP_NAME}:${tag}
-            """
+      """
 
     }
 
@@ -110,7 +110,7 @@ node('maven') {
 
       sh """
                 ${env.OC_CMD} tag ${env.NAMESPACE}/${env.APP_NAME}:${tag} ${env.STAGE2}/${env.APP_NAME}:${tag}
-            """
+      """
 
     }
 
