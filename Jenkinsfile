@@ -21,24 +21,14 @@ node('master') {
 }
 
 node('maven') {
-  def mvnHome = env.MAVEN_HOME ? "${env.MAVEN_HOME}" : "/usr/share/maven/"
   def mvnCmd = "mvn"
   String pomFileLocation = env.BUILD_CONTEXT_DIR ? "${env.BUILD_CONTEXT_DIR}/pom.xml" : "pom.xml"
 
-//  def project = "${env.JOB_NAME.split('/')[0]}"
-//  def app = "${env.JOB_NAME.split('/')[1]}"
-//  def appBuildConfig = "${project}-${app}"
-  def tag
-
   stage('SCM Checkout') {
 
-    final scmVars = checkout(scm)
-    def shortGitCommit = scmVars.GIT_COMMIT[0..6]
-    def pom = readMavenPom file: pomFileLocation
-
-    tag = "${pom.version}-${shortGitCommit}"
-//    echo "Building application ${app}:${tag} from commit ${scmVars} with BuildConfig ${appBuildConfig}"
+    checkout scm
     sh "orig=\$(pwd); cd \$(dirname ${pomFileLocation}); git describe --tags; cd \$orig"
+
   }
 
   stage ('Checks and Build') {
