@@ -1,9 +1,17 @@
-#!/usr/bin/groovy
+/**
+ * Jenkins pipeline to build an application with the GitHub flow in mind (https://guides.github.com/introduction/flow/).
+ *
+ * This pipeline requires the following credentials:
+ * ---
+ * Type          | ID                | Description
+ * Secret text   | devops-project    | The OpenShift project Id of the DevOps project that this Jenkins instance is running in
+ * Secret text   | dev-project       | The OpenShift project Id of the project's development environment
+ * Secret text   | sit-project       | The OpenShift project Id of the project's integration testing environment
+ * Secret text   | uat-project       | The OpenShift project Id of the project's user acceptance environment
+ *
+ */
 
-////
-// This pipeline requires the following plugins:
-// Kubernetes Plugin 0.10
-////
+// TODO extract common stuff into shared libraries: https://jenkins.io/doc/book/pipeline/shared-libraries/
 
 String ocpApiServer = env.OCP_API_SERVER ? "${env.OCP_API_SERVER}" : "https://openshift.default.svc.cluster.local"
 
@@ -16,135 +24,118 @@ node('master') {
   env.APP_NAME = "${env.JOB_NAME}".replaceAll(/-?pipeline-?/, '').replaceAll(/-?${env.NAMESPACE}-?/, '')
   def projectBase = "${env.NAMESPACE}".replaceAll(/-build/, '')
   env.STAGE1 = "${projectBase}-dev"
-  env.STAGE2 = "${projectBase}-stage"
-  env.STAGE3 = "${projectBase}-prod"
+  env.STAGE2 = "${projectBase}-sit"
 
 }
 
 node('maven') {
+
   def mvnCmd = "mvn"
   String pomFileLocation = env.BUILD_CONTEXT_DIR ? "${env.BUILD_CONTEXT_DIR}/pom.xml" : "pom.xml"
 
+  def teamDevOpsProject
+  def projectDevProject
+  def projectSitProject
+  def projectUatProject
+
+  withCredentials([
+          string(credentialsId: 'devops-project', variable: 'DEVOPS_PROJECT_ID'),
+          string(credentialsId: 'dev-project', variable: 'DEV_PROJECT_ID'),
+          string(credentialsId: 'sit-project', variable: 'SIT_PROJECT_ID'),
+          string(credentialsId: 'uat-project', variable: 'UAT_PROJECT_ID'),
+  ]) {
+    teamDevOpsProject = "${env.DEVOPS_PROJECT_ID}"
+    projectDevProject = "${env.DEV_PROJECT_ID}"
+    projectSitProject = "${env.SIT_PROJECT_ID}"
+    projectUatProject = "${env.UAT_PROJECT_ID}"
+  }
+
+  def project = "${env.JOB_NAME.split('/')[0]}"
+  def app = "${env.JOB_NAME.split('/')[1]}"
+  def appBuildConfig = "${project}-${app}"
+  def tag
+
   stage('SCM Checkout') {
 
-    checkout scm
+    final scmVars = checkout(scm)
+    def shortGitCommit = scmVars.GIT_COMMIT[0..6]
+    def pom = readMavenPom file: pomFileLocation
+
+    tag = "${pom.version}-${shortGitCommit}"
+    echo "Building application ${app}:${tag} from commit ${scmVars} with BuildConfig ${appBuildConfig}"
     sh "orig=\$(pwd); cd \$(dirname ${pomFileLocation}); git describe --tags; cd \$orig"
   }
 
-  stage('Build') {
+  stage ('Checks and Build') {
 
     sh "${mvnCmd} clean install -DskipTests=true -f ${pomFileLocation}"
 
   }
 
-  stage('Unit Test') {
+  stage ('Unit Test') {
 
     sh "${mvnCmd} test -f ${pomFileLocation}"
 
   }
 
-  // The following variables need to be defined at the top level and not inside
-  // the scope of a stage - otherwise they would not be accessible from other stages.
-  // Extract version and other properties from the pom.xml
-  def groupId    = getGroupIdFromPom("./pom.xml")
-  def artifactId = getArtifactIdFromPom("./pom.xml")
-  def version    = getVersionFromPom("./pom.xml")
-  println("Artifact ID:" + artifactId + ", Group ID:" + groupId)
-  println("New version tag:" + version)
+  if (env.BRANCH_NAME == 'master' || !env.BRANCH_NAME) {
+    stage('OpenShift Build Image') {
+      sh """
+                rm -rf oc-build && mkdir -p oc-build/deployments
 
-  stage('Build Image') {
+                for t in \$(echo "jar;war;ear" | tr ";" "\\n"); do
+                    cp -rfv ./target/*.\$t oc-build/deployments/ 2> /dev/null || echo "No \$t files"
+                done
 
-    sh """
-       rm -rf oc-build && mkdir -p oc-build/deployments
-
-       for t in \$(echo "jar;war;ear" | tr ";" "\\n"); do
-         cp -rfv ./target/*.\$t oc-build/deployments/ 2> /dev/null || echo "No \$t files"
-       done
-
-       ${env.OC_CMD} start-build ${env.APP_NAME} --from-dir=oc-build --wait=true --follow=true || exit 1
-     """
-  }
-
-  stage("Promote To ${env.STAGE1}") {
-    sh """
-    ${env.OC_CMD} tag ${env.NAMESPACE}/${env.APP_NAME}:latest ${env.STAGE1}/${env.APP_NAME}:latest
-    """
-  }
-
-  stage("Verify Deployment to ${env.STAGE1}") {
-
-    openshiftVerifyDeployment(deploymentConfig: "${env.APP_NAME}", namespace: "${STAGE1}", verifyReplicaCount: true)
-
-    input "Promote Application to Stage?"
-  }
-
-  stage('Integration Test') {
-
-	//TODO: Add application integration testing, verify db connectivity, rest calls ...
-  }
-
-  stage("Promote To ${env.STAGE2}") {
-   sh """
-    ${env.OC_CMD} tag ${env.STAGE1}/${env.APP_NAME}:latest ${env.STAGE2}/${env.APP_NAME}:${version}
-    """
-    sh "${env.OC_CMD} patch dc ${env.APP_NAME} --patch '{\"spec\": { \"triggers\": [ { \"type\": \"ImageChange\", \"imageChangeParams\": { \"containerNames\": [ \"${env.APP_NAME}\" ], \"from\": { \"kind\": \"ImageStreamTag\", \"namespace\": \"${env.STAGE2}\", \"name\": \"${env.APP_NAME}:${version}\"}}}]}}' -n ${env.STAGE2}"
-    openshiftDeploy (apiURL: "${ocpApiServer}", authToken: "${env.TOKEN}", depCfg: "${env.APP_NAME}", namespace: "${env.STAGE2}",  waitTime: '300', waitUnit: 'sec')
-  }
-
-  stage("Verify Deployment to ${env.STAGE2}") {
-
-    openshiftVerifyDeployment(deploymentConfig: "${env.APP_NAME}", namespace: "${STAGE2}", verifyReplicaCount: true)
-
-  }
-
-  def newState = "blue"
-  def currentState = "green"
-
-  stage("Promote To ${env.STAGE3}") {
-
-    sh "oc get route ${env.APP_NAME} -n ${env.STAGE3} -o jsonpath='{ .spec.to.name }' --loglevel=4 > activeservice"
-    activeService = readFile('activeservice').trim()
-    println("Current active service:" + activeService)
-    if (activeService == "${env.APP_NAME}-blue") {
-       newState = "green"
-       currentState = "blue"
+                ${env.OC_CMD} start-build ${env.APP_NAME} --from-dir=oc-build --wait=true --follow=true || exit 1
+            """
     }
 
-    sh """
-      ${env.OC_CMD} tag ${env.STAGE1}/${env.APP_NAME}:'latest' ${env.STAGE3}/${env.APP_NAME}-${newState}:${version}
-      """
-    sh "${env.OC_CMD} patch dc ${env.APP_NAME}-${newState} --patch '{\"spec\": { \"triggers\": [ { \"type\": \"ImageChange\", \"imageChangeParams\": { \"containerNames\": [ \"${env.APP_NAME}-${newState}\" ], \"from\": { \"kind\": \"ImageStreamTag\", \"namespace\": \"${env.STAGE3}\", \"name\": \"${env.APP_NAME}-${newState}:${version}\"}}}]}}' -n ${env.STAGE3}"
+    stage("Deploy to ${env.STAGE1}") {
+      sh ": Deploying to ${env.STAGE1}..."
 
-    openshiftDeploy (apiURL: "${ocpApiServer}", authToken: "${env.TOKEN}", depCfg: "${env.APP_NAME}-${newState}", namespace: "${env.STAGE3}",  waitTime: '300', waitUnit: 'sec')
+      sh """
+                ${env.OC_CMD} tag ${env.NAMESPACE}/${env.APP_NAME}:${tag} ${env.STAGE1}/${env.APP_NAME}:${tag}
+            """
+
+    }
+
+    stage("Verify Deployment to ${env.STAGE1}") {
+
+      openshiftVerifyDeployment(deploymentConfig: "${env.APP_NAME}", namespace: "${STAGE1}", verifyReplicaCount: true)
+
+    }
+
+    stage('Smoke Test') {
+
+      //TODO: Add application integration testing, verify db connectivity, rest calls ...
+      //sh "${mvnCmd} -Psmoke test -f ${pomFileLocation}"
+      //sh "${mvnCmd} -Dtest=*/smoke/*/*Test.java test -f ${pomFileLocation}"
+
+    }
+
+    stage('Integration Test') {
+
+      //TODO: Add application integration testing, verify db connectivity, rest calls ...
+      //sh "${mvnCmd} -Pe2e test -f ${pomFileLocation}"
+      //sh "${mvnCmd} -Dtest=*/e2e/*/*Test.java test -f ${pomFileLocation}"
+
+    }
+
+    stage("Deploy to ${env.STAGE2}") {
+      sh ": Deploying to ${env.STAGE2}..."
+
+      sh """
+                ${env.OC_CMD} tag ${env.NAMESPACE}/${env.APP_NAME}:${tag} ${env.STAGE2}/${env.APP_NAME}:${tag}
+            """
+
+    }
+
+    stage("Verify Deployment to ${env.STAGE2}") {
+
+      openshiftVerifyDeployment(deploymentConfig: "${env.APP_NAME}", namespace: "${STAGE2}", verifyReplicaCount: true)
+
+    }
 
   }
-
-  stage("Verify Deployment to ${env.STAGE3}") {
-
-    openshiftVerifyDeployment(deploymentConfig: "${env.APP_NAME}-${newState}", namespace: "${STAGE3}", verifyReplicaCount: true)
-    println "Application ${env.APP_NAME}-${newState} is now in Production!"
-
-    input "Switch ${env.STAGE3} from ${currentState} to ${newState} deployment?"
-
-    // Switch Route to new active c
-    sh "oc patch route ${env.APP_NAME} --patch '{\"spec\": { \"to\": { \"name\": \"${env.APP_NAME}-${newState}\"}}}' -n ${env.STAGE3}"
-    println("Route switched to: " + newState)
-
-  }
-}
-
-
-// Convenience Functions to read variables from the pom.xml
-// Do not change anything below this line.
-def getVersionFromPom(pom) {
-  def matcher = readFile(pom) =~ '<version>(.+)</version>'
-  matcher ? matcher[0][1] : null
-}
-def getGroupIdFromPom(pom) {
-  def matcher = readFile(pom) =~ '<groupId>(.+)</groupId>'
-  matcher ? matcher[0][1] : null
-}
-def getArtifactIdFromPom(pom) {
-  def matcher = readFile(pom) =~ '<artifactId>(.+)</artifactId>'
-  matcher ? matcher[0][1] : null
 }
