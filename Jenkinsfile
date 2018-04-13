@@ -33,23 +33,6 @@ node('maven') {
   def mvnCmd = "mvn"
   String pomFileLocation = env.BUILD_CONTEXT_DIR ? "${env.BUILD_CONTEXT_DIR}/pom.xml" : "pom.xml"
 
-  def teamDevOpsProject
-  def projectDevProject
-  def projectSitProject
-  def projectUatProject
-
-  withCredentials([
-          string(credentialsId: 'devops-project', variable: 'DEVOPS_PROJECT_ID'),
-          string(credentialsId: 'dev-project', variable: 'DEV_PROJECT_ID'),
-          string(credentialsId: 'sit-project', variable: 'SIT_PROJECT_ID'),
-          string(credentialsId: 'uat-project', variable: 'UAT_PROJECT_ID'),
-  ]) {
-    teamDevOpsProject = "${env.DEVOPS_PROJECT_ID}"
-    projectDevProject = "${env.DEV_PROJECT_ID}"
-    projectSitProject = "${env.SIT_PROJECT_ID}"
-    projectUatProject = "${env.UAT_PROJECT_ID}"
-  }
-
   def project = "${env.JOB_NAME.split('/')[0]}"
   def app = "${env.JOB_NAME.split('/')[1]}"
   def appBuildConfig = "${project}-${app}"
