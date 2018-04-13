@@ -1,17 +1,9 @@
-/**
- * Jenkins pipeline to build an application with the GitHub flow in mind (https://guides.github.com/introduction/flow/).
- *
- * This pipeline requires the following credentials:
- * ---
- * Type          | ID                | Description
- * Secret text   | devops-project    | The OpenShift project Id of the DevOps project that this Jenkins instance is running in
- * Secret text   | dev-project       | The OpenShift project Id of the project's development environment
- * Secret text   | sit-project       | The OpenShift project Id of the project's integration testing environment
- * Secret text   | uat-project       | The OpenShift project Id of the project's user acceptance environment
- *
- */
+#!/usr/bin/groovy
 
-// TODO extract common stuff into shared libraries: https://jenkins.io/doc/book/pipeline/shared-libraries/
+////
+// This pipeline requires the following plugins:
+// Kubernetes Plugin 0.10
+////
 
 String ocpApiServer = env.OCP_API_SERVER ? "${env.OCP_API_SERVER}" : "https://openshift.default.svc.cluster.local"
 
@@ -29,13 +21,13 @@ node('master') {
 }
 
 node('maven') {
-
+  def mvnHome = env.MAVEN_HOME ? "${env.MAVEN_HOME}" : "/usr/share/maven/"
   def mvnCmd = "mvn"
   String pomFileLocation = env.BUILD_CONTEXT_DIR ? "${env.BUILD_CONTEXT_DIR}/pom.xml" : "pom.xml"
 
-  def project = "${env.JOB_NAME.split('/')[0]}"
-  def app = "${env.JOB_NAME.split('/')[1]}"
-  def appBuildConfig = "${project}-${app}"
+//  def project = "${env.JOB_NAME.split('/')[0]}"
+//  def app = "${env.JOB_NAME.split('/')[1]}"
+//  def appBuildConfig = "${project}-${app}"
   def tag
 
   stage('SCM Checkout') {
@@ -45,7 +37,7 @@ node('maven') {
     def pom = readMavenPom file: pomFileLocation
 
     tag = "${pom.version}-${shortGitCommit}"
-    echo "Building application ${app}:${tag} from commit ${scmVars} with BuildConfig ${appBuildConfig}"
+//    echo "Building application ${app}:${tag} from commit ${scmVars} with BuildConfig ${appBuildConfig}"
     sh "orig=\$(pwd); cd \$(dirname ${pomFileLocation}); git describe --tags; cd \$orig"
   }
 
@@ -61,6 +53,15 @@ node('maven') {
 
   }
 
+  // The following variables need to be defined at the top level and not inside
+  // the scope of a stage - otherwise they would not be accessible from other stages.
+  // Extract version and other properties from the pom.xml
+  def groupId    = getGroupIdFromPom("./pom.xml")
+  def artifactId = getArtifactIdFromPom("./pom.xml")
+  def version    = getVersionFromPom("./pom.xml")
+  println("Artifact ID:" + artifactId + ", Group ID:" + groupId)
+  println("New version tag:" + version)
+
   if (env.BRANCH_NAME == 'master' || !env.BRANCH_NAME) {
     stage('OpenShift Build Image') {
       sh """
@@ -71,7 +72,7 @@ node('maven') {
                 done
 
                 ${env.OC_CMD} start-build ${env.APP_NAME} --from-dir=oc-build --wait=true --follow=true || exit 1
-      """
+            """
     }
 
     stage("Deploy to ${env.STAGE1}") {
@@ -79,7 +80,7 @@ node('maven') {
 
       sh """
                 ${env.OC_CMD} tag ${env.NAMESPACE}/${env.APP_NAME}:${tag} ${env.STAGE1}/${env.APP_NAME}:${tag}
-      """
+            """
 
     }
 
@@ -110,7 +111,7 @@ node('maven') {
 
       sh """
                 ${env.OC_CMD} tag ${env.NAMESPACE}/${env.APP_NAME}:${tag} ${env.STAGE2}/${env.APP_NAME}:${tag}
-      """
+            """
 
     }
 
@@ -121,4 +122,19 @@ node('maven') {
     }
 
   }
+}
+
+// Convenience Functions to read variables from the pom.xml
+// Do not change anything below this line.
+def getVersionFromPom(pom) {
+  def matcher = readFile(pom) =~ '<version>(.+)</version>'
+  matcher ? matcher[0][1] : null
+}
+def getGroupIdFromPom(pom) {
+  def matcher = readFile(pom) =~ '<groupId>(.+)</groupId>'
+  matcher ? matcher[0][1] : null
+}
+def getArtifactIdFromPom(pom) {
+  def matcher = readFile(pom) =~ '<artifactId>(.+)</artifactId>'
+  matcher ? matcher[0][1] : null
 }
